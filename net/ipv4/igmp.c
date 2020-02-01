@@ -1211,14 +1211,15 @@ static void igmpv3_del_delrec(struct in_device *in_dev, struct ip_mc_list *im)
 	if (pmc) {
 		im->interface = pmc->interface;
 		im->crcount = in_dev->mr_qrv ?: net->ipv4.sysctl_igmp_qrv;
-		if (im->sfmode == MCAST_INCLUDE) {
-			swap(im->tomb, pmc->tomb);
-			swap(im->sources, pmc->sources);
+		im->sfmode = pmc->sfmode;
+		if (pmc->sfmode == MCAST_INCLUDE) {
+			im->tomb = pmc->tomb;
+			im->sources = pmc->sources;
 			for (psf = im->sources; psf; psf = psf->sf_next)
 				psf->sf_crcount = im->crcount;
 		}
 		in_dev_put(pmc->interface);
-		kfree_pmc(pmc);
+		kfree(pmc);
 	}
 	spin_unlock_bh(&im->lock);
 }
