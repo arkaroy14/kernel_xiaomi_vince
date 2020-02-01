@@ -801,7 +801,17 @@ static int __check_input_term(struct mixer_build *state, int id,
 			term->name = uac_mixer_unit_iMixer(d);
 			return 0;
 		}
-		case UAC_SELECTOR_UNIT:
+		case UAC_SELECTOR_UNIT: {
+			struct uac_selector_unit_descriptor *d = p1;
+			/* call recursively to retrieve the channel info */
+			err = __check_input_term(state, d->baSourceID[0], term);
+			if (err < 0)
+				return err;
+			term->type = d->bDescriptorSubtype << 16; /* virtual type */
+			term->id = id;
+			term->name = uac_selector_unit_iSelector(d);
+			return 0;
+		}
 		/* UAC3_MIXER_UNIT_V3 */
 		case UAC2_CLOCK_SELECTOR:
 		/* UAC3_CLOCK_SOURCE */ {
@@ -1127,7 +1137,8 @@ static int get_min_max_with_quirks(struct usb_mixer_elem_info *cval,
 		if (cval->min + cval->res < cval->max) {
 			int last_valid_res = cval->res;
 			int saved, test, check;
-			get_cur_mix_raw(cval, minchn, &saved);
+			if (get_cur_mix_raw(cval, minchn, &saved) < 0)
+				goto no_res_check;
 			for (;;) {
 				test = saved;
 				if (test < cval->max)
@@ -1147,6 +1158,7 @@ static int get_min_max_with_quirks(struct usb_mixer_elem_info *cval,
 			snd_usb_set_cur_mix_value(cval, minchn, 0, saved);
 		}
 
+no_res_check:
 		cval->initialized = 1;
 	}
 

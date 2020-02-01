@@ -1429,19 +1429,32 @@ static int cpp_close_node(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x88));
 		pr_debug("DEBUG_R1: 0x%x\n",
 			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x8C));
+
 		msm_camera_io_w(0x0, cpp_dev->base + MSM_CPP_MICRO_CLKEN_CTL);
 		msm_cpp_clear_timer(cpp_dev);
 		cpp_release_hardware(cpp_dev);
 		if (cpp_dev->iommu_state == CPP_IOMMU_STATE_ATTACHED) {
-			cpp_dev->iommu_state = CPP_IOMMU_STATE_DETACHED;
-			rc = cam_smmu_ops(cpp_dev->iommu_hdl, CAM_SMMU_DETACH);
+			if (cpp_dev->security_mode == SECURE_MODE)
+				rc = cam_smmu_ops(cpp_dev->iommu_hdl,
+					CAM_SMMU_DETACH_SEC_CPP);
+			else
+				rc = cam_smmu_ops(cpp_dev->iommu_hdl,
+					CAM_SMMU_DETACH);
+
 			if (rc < 0)
 				pr_err("Error: Detach fail in release\n");
+			cpp_dev->iommu_state = CPP_IOMMU_STATE_DETACHED;
 		}
 		cam_smmu_destroy_handle(cpp_dev->iommu_hdl);
 		msm_cpp_empty_list(processing_q, list_frame);
 		msm_cpp_empty_list(eventData_q, list_eventdata);
 		cpp_dev->state = CPP_STATE_OFF;
+
+		if (cpp_dev->ion_client) {
+			CPP_DBG("Invoking ion_client_destroy()\n");
+			ion_client_destroy(cpp_dev->ion_client);
+			cpp_dev->ion_client = NULL;
+		}
 	}
 
 	/* unregister vbif error handler */

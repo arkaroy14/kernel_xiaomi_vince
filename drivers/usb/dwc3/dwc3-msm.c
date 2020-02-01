@@ -274,6 +274,11 @@ struct dwc3_msm {
 	struct mutex suspend_resume_mutex;
 
 	enum usb_device_speed override_usb_speed;
+
+	u64			dummy_gsi_db;
+	dma_addr_t		dummy_gsi_db_dma;
+	u64			*dummy_gevntcnt;
+	dma_addr_t		dummy_gevntcnt_dma;
 };
 
 #define USB_HSPHY_3P3_VOL_MIN		3050000 /* uV */
@@ -853,6 +858,7 @@ static void gsi_get_channel_info(struct usb_ep *ep,
 	int last_trb_index = 0;
 	struct dwc3	*dwc = dep->dwc;
 	struct usb_gsi_request *request = ch_info->ch_req;
+	struct dwc3_msm *mdwc = dev_get_drvdata(dwc->dev->parent);
 
 	/* Provide physical USB addresses for DEPCMD and GEVENTCNT registers */
 	ch_info->depcmd_low_addr = (u32)(dwc->reg_phys +
@@ -887,14 +893,28 @@ static void gsi_get_channel_info(struct usb_ep *ep,
 	/* Store last 16 bits of LINK TRB address as per GSI hw requirement */
 	ch_info->last_trb_addr = (dwc3_trb_dma_offset(dep,
 			&dep->trb_pool[last_trb_index - 1]) & 0x0000FFFF);
-	ch_info->gevntcount_low_addr = (u32)(dwc->reg_phys +
-			DWC3_GEVNTCOUNT(ep->ep_intr_num));
-	ch_info->gevntcount_hi_addr = 0;
+	dev_dbg(dwc->dev, "depcmd_laddr=%x last_trb_addr=%x\n",
+		ch_info->depcmd_low_addr, ch_info->last_trb_addr);
 
-	dev_dbg(dwc->dev,
-	"depcmd_laddr=%x last_trb_addr=%x gevtcnt_laddr=%x gevtcnt_haddr=%x",
-		ch_info->depcmd_low_addr, ch_info->last_trb_addr,
-		ch_info->gevntcount_low_addr, ch_info->gevntcount_hi_addr);
+	/*
+	 * Check if NORMAL EP is used with GSI. In that case USB driver
+	 * processes events and GSI shouldn't access GEVNTCOUNT(0) register.
+	 */
+	if (ep->ep_intr_num) {
+		ch_info->gevntcount_low_addr = (u32)(dwc->reg_phys +
+			DWC3_GEVNTCOUNT(ep->ep_intr_num));
+		ch_info->gevntcount_hi_addr = 0;
+		dev_dbg(dwc->dev, "gevtcnt_laddr=%x gevtcnt_haddr=%x\n",
+		     ch_info->gevntcount_low_addr, ch_info->gevntcount_hi_addr);
+	} else {
+		ch_info->gevntcount_low_addr = (u32)mdwc->dummy_gevntcnt_dma;
+		ch_info->gevntcount_hi_addr =
+				(u32)((u64)mdwc->dummy_gevntcnt_dma >> 32);
+		dev_dbg(dwc->dev, "Dummy GEVNTCNT Addr %pK: %llx %x (LSB)\n",
+			mdwc->dummy_gevntcnt,
+			(unsigned long long)mdwc->dummy_gevntcnt_dma,
+			(u32)mdwc->dummy_gevntcnt_dma);
+	}
 }
 
 /*
@@ -1962,6 +1982,32 @@ static void dwc3_msm_notify_event(struct dwc3 *dwc, unsigned int event,
 			}
 			mdwc->gsi_ev_buff[i] = evt;
 		}
+		/*
+		 * Set-up dummy buffer to use as doorbell while IPA GSI
+		 * connection is in progress.
+		 */
+		mdwc->dummy_gsi_db_dma = dma_map_single(dwc->sysdev,
+						&mdwc->dummy_gsi_db,
+						sizeof(mdwc->dummy_gsi_db),
+						DMA_FROM_DEVICE);
+
+		if (dma_mapping_error(dwc->sysdev, mdwc->dummy_gsi_db_dma)) {
+			dev_err(dwc->dev, "failed to map dummy doorbell buffer\n");
+			mdwc->dummy_gsi_db_dma = (dma_addr_t)NULL;
+		}
+
+		/*
+		 * Set-up dummy GEVNTCOUNT address to be passed on to GSI for
+		 * normal (non HW-accelerated) EPs.
+		 */
+		mdwc->dummy_gevntcnt =
+			kzalloc(sizeof(*mdwc->dummy_gevntcnt), GFP_KERNEL);
+		if (!mdwc->dummy_gevntcnt) {
+			mdwc->dummy_gevntcnt_dma = (dma_addr_t)NULL;
+			break;
+		}
+
+		mdwc->dummy_gevntcnt_dma = virt_to_phys(mdwc->dummy_gevntcnt);
 		break;
 	case DWC3_GSI_EVT_BUF_SETUP:
 		dev_dbg(mdwc->dev, "DWC3_GSI_EVT_BUF_SETUP\n");
@@ -2015,6 +2061,15 @@ static void dwc3_msm_notify_event(struct dwc3 *dwc, unsigned int event,
 			dwc3_writel(dwc->regs, DWC3_GEVNTCOUNT((i+1)), 0);
 		}
 		break;
+	case DWC3_GSI_EVT_BUF_CLEAR:
+		dev_dbg(mdwc->dev, "DWC3_GSI_EVT_BUF_CLEAR\n");
+		for (i = 0; i < mdwc->num_gsi_event_buffers; i++) {
+			reg = dwc3_readl(dwc->regs, DWC3_GEVNTCOUNT((i+1)));
+			reg &= DWC3_GEVNTCOUNT_MASK;
+			dwc3_writel(dwc->regs, DWC3_GEVNTCOUNT((i+1)), reg);
+			dbg_log_string("remaining EVNTCOUNT(%d)=%d", i+1, reg);
+		}
+		break;
 	case DWC3_GSI_EVT_BUF_FREE:
 		dev_dbg(mdwc->dev, "DWC3_GSI_EVT_BUF_FREE\n");
 		if (!mdwc->gsi_ev_buff)
@@ -2026,9 +2081,24 @@ static void dwc3_msm_notify_event(struct dwc3 *dwc, unsigned int event,
 				dma_free_coherent(dwc->sysdev, evt->length,
 							evt->buf, evt->dma);
 		}
+		if (mdwc->dummy_gevntcnt_dma) {
+			mdwc->dummy_gevntcnt_dma = (dma_addr_t)NULL;
+			kfree(mdwc->dummy_gevntcnt);
+		}
+		if (mdwc->dummy_gsi_db_dma) {
+			dma_unmap_single(dwc->sysdev, mdwc->dummy_gsi_db_dma,
+					 sizeof(mdwc->dummy_gsi_db),
+					 DMA_FROM_DEVICE);
+			mdwc->dummy_gsi_db_dma = (dma_addr_t)NULL;
+		}
 		break;
 	case DWC3_CONTROLLER_NOTIFY_DISABLE_UPDXFER:
 		dwc3_msm_dbm_disable_updxfer(dwc, value);
+		break;
+	case DWC3_CONTROLLER_NOTIFY_CLEAR_DB:
+		dev_dbg(mdwc->dev, "DWC3_CONTROLLER_NOTIFY_CLEAR_DB\n");
+		dwc3_msm_write_reg_field(mdwc->base,
+			GSI_GENERAL_CFG_REG, BLOCK_GSI_WR_GO_MASK, true);
 		break;
 	default:
 		dev_dbg(mdwc->dev, "unknown dwc3 event\n");
