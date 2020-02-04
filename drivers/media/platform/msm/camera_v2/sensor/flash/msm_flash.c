@@ -1,4 +1,5 @@
-/* Copyright (c) 2009-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2009-2017, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2018 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -16,7 +17,6 @@
 #include <linux/module.h>
 #include <linux/of_gpio.h>
 #include "msm_flash.h"
-#include "msm_camera_io_util.h"
 #include "msm_camera_dt_util.h"
 #include "msm_cci.h"
 
@@ -450,19 +450,9 @@ static int32_t msm_flash_gpio_init(
 static int32_t msm_flash_i2c_release(
 	struct msm_flash_ctrl_t *flash_ctrl)
 {
-	int32_t rc = 0;
-
-	if (!(&flash_ctrl->power_info) || !(&flash_ctrl->flash_i2c_client)) {
-		pr_err("%s:%d failed: %pK %pK\n",
-			__func__, __LINE__, &flash_ctrl->power_info,
-			&flash_ctrl->flash_i2c_client);
-		return -EINVAL;
-	}
-
-	rc = msm_camera_power_down(&flash_ctrl->power_info,
+	if (msm_camera_power_down(&flash_ctrl->power_info,
 		flash_ctrl->flash_device_type,
-		&flash_ctrl->flash_i2c_client);
-	if (rc < 0) {
+		&flash_ctrl->flash_i2c_client) < 0) {
 		pr_err("%s msm_camera_power_down failed %d\n",
 			__func__, __LINE__);
 		return -EINVAL;
@@ -580,8 +570,6 @@ static int32_t msm_flash_init(
 			__func__, __LINE__,
 			flash_data->cfg.flash_init_info->flash_driver_type);
 	}
-	if (flash_ctrl->platform_flash_init)
-		flash_ctrl->platform_flash_init(flash_ctrl, flash_data);
 
 	if (flash_ctrl->func_tbl->camera_flash_init) {
 		rc = flash_ctrl->func_tbl->camera_flash_init(
@@ -656,45 +644,6 @@ static int32_t msm_flash_init_prepare(
 	}
 	return msm_flash_init(flash_ctrl, &flash_data_k);
 #endif
-}
-
-static int32_t msm_flash_prepare(
-	struct msm_flash_ctrl_t *flash_ctrl)
-{
-	int32_t ret = 0;
-
-	CDBG("%s:%d: State : %d\n",
-		__func__, __LINE__, flash_ctrl->flash_state);
-
-	if (flash_ctrl->switch_trigger == NULL) {
-		pr_err("%s:%d Invalid argument\n",
-				__func__, __LINE__);
-		return -EINVAL;
-	}
-
-	if (flash_ctrl->flash_state == MSM_CAMERA_FLASH_INIT &&
-		flash_ctrl->is_regulator_enabled == 0) {
-		ret = qpnp_flash_led_prepare(flash_ctrl->switch_trigger,
-				ENABLE_REGULATOR, NULL);
-		if (ret < 0) {
-			pr_err("%s:%d regulator enable failed ret = %d\n",
-				__func__, __LINE__, ret);
-			return ret;
-		}
-		flash_ctrl->is_regulator_enabled = 1;
-	} else if (flash_ctrl->flash_state == MSM_CAMERA_FLASH_RELEASE &&
-		flash_ctrl->is_regulator_enabled) {
-		ret = qpnp_flash_led_prepare(flash_ctrl->switch_trigger,
-				DISABLE_REGULATOR, NULL);
-		if (ret < 0) {
-			pr_err("%s:%d regulator disable failed ret = %d\n",
-				__func__, __LINE__, ret);
-			return ret;
-		}
-		flash_ctrl->is_regulator_enabled = 0;
-	}
-	CDBG("%s:%d:Exit\n", __func__, __LINE__);
-	return ret;
 }
 
 static int32_t msm_flash_low(
@@ -1366,8 +1315,6 @@ static int32_t msm_flash_platform_probe(struct platform_device *pdev)
 		kfree(flash_ctrl);
 		return -EINVAL;
 	}
-	if (flash_ctrl->flash_driver_type == FLASH_DRIVER_GPIO)
-		platform_set_drvdata(pdev, flash_ctrl);
 
 	flash_ctrl->flash_state = MSM_CAMERA_FLASH_RELEASE;
 	flash_ctrl->power_info.dev = &flash_ctrl->pdev->dev;
@@ -1417,6 +1364,19 @@ static int32_t msm_flash_platform_probe(struct platform_device *pdev)
 	CDBG("probe success\n");
 	return rc;
 }
+
+MODULE_DEVICE_TABLE(of, msm_flash_i2c_dt_match);
+
+static struct i2c_driver msm_flash_i2c_driver = {
+	.id_table = msm_flash_i2c_id,
+	.probe  = msm_camera_flash_i2c_probe,
+	.remove = __exit_p(msm_camera_flash_i2c_remove),
+	.driver = {
+		.name = "qcom,camera-flash",
+		.owner = THIS_MODULE,
+		.of_match_table = msm_flash_i2c_dt_match,
+	},
+};
 
 MODULE_DEVICE_TABLE(of, msm_flash_dt_match);
 
